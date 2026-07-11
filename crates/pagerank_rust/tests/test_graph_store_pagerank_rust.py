@@ -1,4 +1,4 @@
-"""GraphStore.compute_pagerank 与 Rust 内核集成对照。
+"""GraphStore.compute_pagerank 与 Rust CSR / dense / scipy 对照。
 
 直接运行:
     python crates/pagerank_rust/tests/test_graph_store_pagerank_rust.py
@@ -34,7 +34,31 @@ if "src" not in sys.modules:
     sys.modules["src.common"] = common_mod
     sys.modules["src.common.logger"] = logger_mod
 
-from core.storage.graph_store import GraphStore  # noqa: E402
+
+def _load_module(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# 预注册包结构，满足 graph_store 的相对导入
+for pkg in ("core", "core.utils", "core.storage", "core.retrieval"):
+    if pkg not in sys.modules:
+        m = types.ModuleType(pkg)
+        m.__path__ = [str(REPO_ROOT / pkg.replace(".", "/"))]  # type: ignore[attr-defined]
+        sys.modules[pkg] = m
+
+_load_module("core.utils.hash", REPO_ROOT / "core" / "utils" / "hash.py")
+_load_module("core.utils.io", REPO_ROOT / "core" / "utils" / "io.py")
+_load_module(
+    "core.retrieval.pagerank_kernel",
+    REPO_ROOT / "core" / "retrieval" / "pagerank_kernel.py",
+)
+_gs = _load_module("core.storage.graph_store", REPO_ROOT / "core" / "storage" / "graph_store.py")
+GraphStore = _gs.GraphStore
 
 
 def _scipy_only_pagerank(store: GraphStore, alpha: float = 0.85, max_iter: int = 100, tol: float = 1e-9):
@@ -63,39 +87,75 @@ def _scipy_only_pagerank(store: GraphStore, alpha: float = 0.85, max_iter: int =
     return {store._nodes[i]: float(v) for i, v in enumerate(p)}
 
 
+def _dict_diff(a: dict, b: dict):
+    nodes = sorted(set(a) | set(b))
+    diffs = [abs(a.get(n, 0.0) - b.get(n, 0.0)) for n in nodes]
+    return (max(diffs) if diffs else 0.0), (sum(diffs) if diffs else 0.0)
+
+
+def _run_case(name: str, edges, weights) -> bool:
+    store = GraphStore()
+    store.add_edges(edges, weights=weights)
+
+    path_scores = store.compute_pagerank(personalization=None, alpha=0.85, max_iter=100, tol=1e-9)
+    scipy_scores = _scipy_only_pagerank(store, alpha=0.85, max_iter=100, tol=1e-9)
+
+    max_diff, l1 = _dict_diff(path_scores, scipy_scores)
+    print(f"--- {name} ---")
+    print("path :", {k: round(v, 6) for k, v in sorted(path_scores.items())})
+    print("scipy:", {k: round(v, 6) for k, v in sorted(scipy_scores.items())})
+    print(f"max_diff={max_diff:.3e} L1={l1:.3e}")
+
+    if max_diff < 1e-5 and l1 < 1e-5:
+        print(f"[{name}] PASS")
+        return True
+    print(f"[{name}] FAIL")
+    return False
+
+
 def main() -> int:
     try:
         from a_memorix_kernel_rust import pagerank as _  # noqa: F401
 
-        rust_ok = True
+        rust_dense = True
     except ImportError:
-        rust_ok = False
+        rust_dense = False
+
+    try:
+        from a_memorix_kernel_rust import pagerank_csr as _  # noqa: F401
+
+        rust_csr = True
+    except ImportError:
+        rust_csr = False
+
+    if not rust_dense and not rust_csr:
         print("SKIP: Rust 内核未安装")
         return 0
 
-    print(f"Rust available: {rust_ok}")
+    print(f"Rust dense available: {rust_dense}")
+    print(f"Rust CSR   available: {rust_csr}")
 
-    store = GraphStore()
-    # A->B, A->C, B->C, C->A
-    store.add_edges(
+    ok = True
+    ok = _run_case(
+        "triangle_plus",
         [("A", "B"), ("A", "C"), ("B", "C"), ("C", "A")],
-        weights=[1.0, 1.0, 1.0, 1.0],
-    )
+        [1.0, 1.0, 1.0, 1.0],
+    ) and ok
 
-    rust_path = store.compute_pagerank(personalization=None, alpha=0.85, max_iter=100, tol=1e-9)
-    scipy_path = _scipy_only_pagerank(store, alpha=0.85, max_iter=100, tol=1e-9)
+    ok = _run_case(
+        "with_dangling",
+        [("A", "B"), ("B", "C"), ("C", "A"), ("A", "D")],
+        [1.0, 1.0, 1.0, 1.0],
+    ) and ok
 
-    nodes = sorted(set(rust_path) | set(scipy_path))
-    diffs = [abs(rust_path[n] - scipy_path[n]) for n in nodes]
-    max_diff = max(diffs) if diffs else 0.0
-    l1 = sum(diffs)
+    ok = _run_case(
+        "weighted",
+        [("X", "Y"), ("Y", "Z"), ("Z", "X"), ("X", "Z")],
+        [2.0, 1.0, 0.5, 3.0],
+    ) and ok
 
-    print("rust:", {k: round(v, 6) for k, v in sorted(rust_path.items())})
-    print("scipy:", {k: round(v, 6) for k, v in sorted(scipy_path.items())})
-    print(f"max_diff={max_diff:.3e} L1={l1:.3e}")
-
-    # 浮点路径不同（dense power vs sparse scipy），放宽到 1e-5
-    if max_diff < 1e-5 and l1 < 1e-5:
+    print()
+    if ok:
         print("PASS")
         return 0
     print("FAIL")

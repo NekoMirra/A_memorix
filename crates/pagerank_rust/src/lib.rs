@@ -1,43 +1,31 @@
 //! PoC: Rust 加速的 PageRank 实现
 //!
-//! 目标：替换 `core/storage/graph_store.py:873 compute_pagerank` 中的 Python 循环。
+//! 目标：替换 `core/storage/graph_store.py` 中的 Python 循环。
 //!
-//! 邻接矩阵语义:
+//! ## Dense 邻接语义 (`pagerank`)
+//!
 //!     adjacency[i][j] 表示 j -> i 的边权（i 接收 j 的链接）
 //!     - 节点 i 的入度 = adjacency[i].sum()
 //!     - 节点 j 的出度 = adjacency[:, j].sum()（列和）
 //!
-//! PageRank 公式:
+//! ## CSR 邻接语义 (`pagerank_csr`) —— 与 GraphStore 一致
+//!
+//!     CSR 行 = source，列 = target，即 adj[src, tgt] = src -> tgt
+//!     - 节点 src 的出度 = 行和
+//!     - 转移: M = A^T * D_inv（D_inv 作用于出度）
+//!
+//! PageRank 公式（均匀 personalization）:
 //!     scores[i] = (1 - damping) / n
-//!               + damping * Σ_j (adjacency[i][j] / out_sum[j]) * scores[j]
+//!               + damping * Σ_j (edge_j_to_i / out_sum[j]) * scores[j]
 //!               + damping * dangling_sum / n
 //!
 //! 其中 dangling_sum = Σ_{k: out_sum[k]=0} scores[k]
 //!
-//! **重要：本 PoC 仅做技术验证（PyO3 通路 + 数值正确性），不直接绑定到 graph_store。**
-//!
-//! ## 接入路径
-//!
-//! 1. 在 `core/storage/graph_store.py` 加 try/except 软依赖:
-//!    ```python
-//!    try:
-//!        from a_memorix_kernel_rust import pagerank as _rust_pagerank
-//!        _HAS_RUST_KERNEL = True
-//!    except ImportError:
-//!        _HAS_RUST_KERNEL = False
-//!    ```
-//! 2. `compute_pagerank` 在 `_HAS_RUST_KERNEL` 且 `personalization is None` 时调用 Rust
-//! 3. 通过 `requirements.txt` 的 `[kernel-rust] extra` 让用户可选安装
-//!
-//! ## 后续可扩展
-//!
-//! - `graph_store` 稀疏邻接批量运算（CSR/CSC 转换）
-//! - personalization 向量化（当前 PoC 仅支持均匀）
-//! - `metadata_store` 批量 SQLite upsert 预编译
+//! 与 GraphStore scipy 路径在均匀 personalization 下数值等价。
 
 use pyo3::prelude::*;
 
-/// Power iteration 实现的 PageRank。
+/// Power iteration 实现的 PageRank（dense，列出度语义）。
 ///
 /// 参数:
 /// - `adjacency`: 邻接矩阵 `[[w_ij, ...], ...]`，w_ij 表示 j -> i 的权重
@@ -87,7 +75,7 @@ fn pagerank(
         let dangling_sum: f64 = scores
             .iter()
             .zip(out_sum.iter())
-            .filter_map(|(s, out)| if *out == 0.0 { Some(s) } else { None })
+            .filter_map(|(s, out)| if *out == 0.0 { Some(*s) } else { None })
             .sum();
         let dangling_term = damping * dangling_sum / n as f64;
 
@@ -116,6 +104,142 @@ fn pagerank(
     Ok(scores)
 }
 
+/// Power iteration PageRank（CSR，GraphStore src->tgt 语义）。
+///
+/// 参数:
+/// - `n`: 节点数
+/// - `indptr`: CSR indptr，长度 n+1（i64，兼容 scipy）
+/// - `indices`: CSR 列索引（目标节点，i32 兼容 scipy）
+/// - `data`: CSR 非零边权
+/// - `damping` / `max_iter` / `tol`: 同 dense 路径
+///
+/// 邻接语义:
+/// - 行 = source，列 = target（adj[src, tgt] = src -> tgt）
+/// - 出度 = 行和
+/// - 转移贡献: next[tgt] += (w / out[src]) * scores[src]
+///
+/// 返回长度 n 的得分向量。
+#[pyfunction]
+#[pyo3(signature = (n, indptr, indices, data, damping = 0.85, max_iter = 100, tol = 1e-6))]
+fn pagerank_csr(
+    n: usize,
+    indptr: Vec<i64>,
+    indices: Vec<i32>,
+    data: Vec<f64>,
+    damping: f64,
+    max_iter: usize,
+    tol: f64,
+) -> PyResult<Vec<f64>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    if indptr.len() != n + 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "indptr 长度 {} != n+1 ({})",
+            indptr.len(),
+            n + 1
+        )));
+    }
+    if indices.len() != data.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "indices 长度 {} != data 长度 {}",
+            indices.len(),
+            data.len()
+        )));
+    }
+    let nnz = data.len();
+    let last = indptr[n];
+    if last < 0 || last as usize != nnz {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "indptr[n]={} 与 nnz={} 不一致",
+            last, nnz
+        )));
+    }
+    for (i, &p) in indptr.iter().enumerate() {
+        if p < 0 || p as usize > nnz {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "indptr[{}]={} 越界 (nnz={})",
+                i, p, nnz
+            )));
+        }
+        if i > 0 && indptr[i] < indptr[i - 1] {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "indptr 非单调: indptr[{}]={} < indptr[{}]={}",
+                i,
+                indptr[i],
+                i - 1,
+                indptr[i - 1]
+            )));
+        }
+    }
+    for (k, &col) in indices.iter().enumerate() {
+        if col < 0 || col as usize >= n {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "indices[{}]={} 越界 (n={})",
+                k, col, n
+            )));
+        }
+    }
+
+    // 出度 = 行和（src 行）
+    let mut out_sum = vec![0.0_f64; n];
+    for src in 0..n {
+        let start = indptr[src] as usize;
+        let end = indptr[src + 1] as usize;
+        let mut s = 0.0_f64;
+        for k in start..end {
+            s += data[k];
+        }
+        out_sum[src] = s;
+    }
+
+    let mut scores = vec![1.0_f64 / n as f64; n];
+    let teleport = (1.0 - damping) / n as f64;
+    let mut next = vec![0.0_f64; n];
+
+    for _ in 0..max_iter {
+        // dangling mass: 出度为 0 的节点上的分数和
+        let dangling_sum: f64 = scores
+            .iter()
+            .zip(out_sum.iter())
+            .filter_map(|(s, out)| if *out == 0.0 { Some(*s) } else { None })
+            .sum();
+        let dangling_term = damping * dangling_sum / n as f64;
+
+        // next[tgt] 累加来自各 src 的转移
+        next.fill(0.0);
+        for src in 0..n {
+            let out = out_sum[src];
+            if out <= 0.0 {
+                continue;
+            }
+            let scale = scores[src] / out;
+            let start = indptr[src] as usize;
+            let end = indptr[src + 1] as usize;
+            for k in start..end {
+                let tgt = indices[k] as usize;
+                next[tgt] += data[k] * scale;
+            }
+        }
+
+        for i in 0..n {
+            next[i] = teleport + damping * next[i] + dangling_term;
+        }
+
+        let diff: f64 = scores
+            .iter()
+            .zip(next.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        std::mem::swap(&mut scores, &mut next);
+        if diff < tol {
+            break;
+        }
+    }
+
+    Ok(scores)
+}
+
 /// 简单求和 PoC，验证 PyO3 链路。
 #[pyfunction]
 fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
@@ -127,6 +251,9 @@ fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
 mod a_memorix_kernel_rust {
     #[pymodule_export]
     use super::pagerank;
+
+    #[pymodule_export]
+    use super::pagerank_csr;
 
     #[pymodule_export]
     use super::sum_as_string;

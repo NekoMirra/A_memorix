@@ -895,16 +895,34 @@ class GraphStore:
 
         n = len(self._nodes)
 
-        # Rust 加速路径：仅均匀 personalization + 中小规模图
+        # Rust 加速路径：仅均匀 personalization
         # GraphStore 邻接语义: adj[src, tgt] = src -> tgt（行和=出度）
-        # Rust PoC 邻接语义: adj[i][j] = j -> i（列和=出度）
-        # 因此必须传 adj.T 才能语义对齐。
+        # 优先 CSR Rust（与 scipy 路径同语义，无需 dense 转换）；
+        # 其次 dense Rust（需转置对齐列出度语义）；最后 scipy。
         if personalization is None:
             try:
-                from ..retrieval.pagerank_kernel import rust_pagerank_dense_uniform
+                from ..retrieval.pagerank_kernel import (
+                    rust_pagerank_csr,
+                    rust_pagerank_dense_uniform,
+                )
 
+                # 1) CSR 路径：直接吃稀疏邻接，语义与下方 scipy 一致
+                rust_scores = rust_pagerank_csr(
+                    self._adjacency,
+                    damping=alpha,
+                    max_iter=max_iter,
+                    tol=tol,
+                )
+                if rust_scores is not None and len(rust_scores) == n:
+                    logger.debug("PageRank 使用 Rust CSR 内核计算 (n=%d)", n)
+                    return {
+                        self._nodes[idx]: float(val)
+                        for idx, val in enumerate(rust_scores)
+                    }
+
+                # 2) dense 回退：Rust PoC dense 语义 adj[i][j]=j->i，需传 adj.T
                 dense_src_tgt = self._adjacency.astype(np.float64).toarray()
-                dense_for_rust = dense_src_tgt.T  # 对齐 j -> i 语义
+                dense_for_rust = dense_src_tgt.T
                 rust_scores = rust_pagerank_dense_uniform(
                     dense_for_rust,
                     damping=alpha,
@@ -912,7 +930,7 @@ class GraphStore:
                     tol=tol,
                 )
                 if rust_scores is not None and len(rust_scores) == n:
-                    logger.debug("PageRank 使用 Rust 内核计算 (n=%d)", n)
+                    logger.debug("PageRank 使用 Rust dense 内核计算 (n=%d)", n)
                     return {
                         self._nodes[idx]: float(val)
                         for idx, val in enumerate(rust_scores)

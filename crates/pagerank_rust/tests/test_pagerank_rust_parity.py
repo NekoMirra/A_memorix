@@ -5,10 +5,9 @@
 """
 from __future__ import annotations
 
-import os
-import sys
 import importlib.util
 import random
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +38,14 @@ except ImportError:
     RUST_AVAILABLE = False
     rust_pagerank = None
 
+try:
+    from a_memorix_kernel_rust import pagerank_csr as rust_pagerank_csr
+
+    RUST_CSR_AVAILABLE = True
+except ImportError:
+    RUST_CSR_AVAILABLE = False
+    rust_pagerank_csr = None
+
 
 def build_random_graph(n: int, density: float, seed: int) -> np.ndarray:
     """构建 n 节点稀疏随机图，返回 dense 邻接矩阵（行=入边，列=出边）。"""
@@ -50,41 +57,92 @@ def build_random_graph(n: int, density: float, seed: int) -> np.ndarray:
                 continue
             if rng.random() < density:
                 adj[i][j] = rng.random()  # j -> i
-    # 保证没有全零列（防止节点孤立但保留 dangling 测试）
     return adj
 
 
+def dense_j_to_i_to_csr_src_tgt(adj_j_to_i: np.ndarray):
+    """将 dense j->i 矩阵转为 GraphStore CSR (src->tgt = adj.T)。"""
+    from scipy.sparse import csr_matrix
+
+    src_tgt = adj_j_to_i.T  # src->tgt
+    return csr_matrix(src_tgt)
+
+
 def compare_one(name: str, adj: np.ndarray, damping: float, max_iter: int, tol: float) -> bool:
-    """对一组参数跑 Python 和 Rust，比较输出。"""
+    """对一组参数跑 Python dense / Rust dense / Rust CSR，比较输出。"""
     py_scores = pagerank_python(adj, damping=damping, max_iter=max_iter, tol=tol)
 
+    rust_scores = None
     if RUST_AVAILABLE:
         rust_scores_list = rust_pagerank(adj.tolist(), damping, max_iter, tol)
         rust_scores = np.asarray(rust_scores_list, dtype=np.float64)
     else:
-        print(f"[{name}] SKIP: Rust 内核未安装（pip install -e crates/pagerank_rust）")
-        return True
+        print(f"[{name}] SKIP dense: Rust 内核未安装（pip install wheel）")
 
-    # 排序一致化（PageRank 节点顺序按输入矩阵定义，两者一致）
-    diff_l1 = float(np.abs(py_scores - rust_scores).sum())
-    diff_max = float(np.abs(py_scores - rust_scores).max())
-    # 期望：浮点累加顺序差异，误差量级在 1e-9 ~ 1e-12
+    csr_scores = None
+    if RUST_CSR_AVAILABLE:
+        csr = dense_j_to_i_to_csr_src_tgt(adj)
+        csr_list = rust_pagerank_csr(
+            adj.shape[0],
+            csr.indptr.astype(np.int64).tolist(),
+            csr.indices.astype(np.int32).tolist(),
+            csr.data.astype(np.float64).tolist(),
+            damping,
+            max_iter,
+            tol,
+        )
+        csr_scores = np.asarray(csr_list, dtype=np.float64)
+    else:
+        print(f"[{name}] SKIP csr: Rust CSR 未安装")
+
     threshold_l1 = 1e-6
     threshold_max = 1e-6
-    passed = diff_l1 < threshold_l1 and diff_max < threshold_max
+    passed = True
 
-    status = "PASS" if passed else "FAIL"
-    print(
-        f"[{name}] {status}  "
-        f"L1_diff={diff_l1:.3e} (tol={threshold_l1:.0e})  "
-        f"max_diff={diff_max:.3e} (tol={threshold_max:.0e})  "
-        f"sum(py)={py_scores.sum():.6f} sum(rust)={rust_scores.sum():.6f}"
-    )
+    if rust_scores is not None:
+        diff_l1 = float(np.abs(py_scores - rust_scores).sum())
+        diff_max = float(np.abs(py_scores - rust_scores).max())
+        ok = diff_l1 < threshold_l1 and diff_max < threshold_max
+        passed = passed and ok
+        status = "PASS" if ok else "FAIL"
+        print(
+            f"[{name}/dense] {status}  "
+            f"L1_diff={diff_l1:.3e}  max_diff={diff_max:.3e}  "
+            f"sum(py)={py_scores.sum():.6f} sum(rust)={rust_scores.sum():.6f}"
+        )
+
+    if csr_scores is not None:
+        diff_l1 = float(np.abs(py_scores - csr_scores).sum())
+        diff_max = float(np.abs(py_scores - csr_scores).max())
+        ok = diff_l1 < threshold_l1 and diff_max < threshold_max
+        passed = passed and ok
+        status = "PASS" if ok else "FAIL"
+        print(
+            f"[{name}/csr]   {status}  "
+            f"L1_diff={diff_l1:.3e}  max_diff={diff_max:.3e}  "
+            f"sum(py)={py_scores.sum():.6f} sum(csr)={csr_scores.sum():.6f}"
+        )
+
+    if rust_scores is not None and csr_scores is not None:
+        diff_l1 = float(np.abs(rust_scores - csr_scores).sum())
+        diff_max = float(np.abs(rust_scores - csr_scores).max())
+        ok = diff_l1 < threshold_l1 and diff_max < threshold_max
+        passed = passed and ok
+        status = "PASS" if ok else "FAIL"
+        print(
+            f"[{name}/dense-vs-csr] {status}  "
+            f"L1_diff={diff_l1:.3e}  max_diff={diff_max:.3e}"
+        )
+
+    if rust_scores is None and csr_scores is None:
+        return True  # 全 skip 视为不失败
+
     return passed
 
 
 def main() -> int:
-    print(f"Rust 内核可用: {RUST_AVAILABLE}")
+    print(f"Rust dense 可用: {RUST_AVAILABLE}")
+    print(f"Rust CSR   可用: {RUST_CSR_AVAILABLE}")
     print(f"Python: {sys.version.split()[0]}  numpy: {np.__version__}")
     print()
 
@@ -108,13 +166,15 @@ def main() -> int:
         {"damping": 0.85, "max_iter": 100, "tol": 1e-9},
     ))
 
-    # Case 3: 含 dangling 节点（出度=0）
+    # Case 3: 含 dangling 节点（出度=0）—— dense 语义下列和=0
     cases.append((
         "with_dangling",
         np.array([
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0],  # node 2 是 dangling
+            [0.0, 0.0, 0.0],  # node 2 是 dangling (列 2 全 0? 这里行2全0是入边)
+            # 在 j->i 语义中，列 j 全 0 => j 无出边 => dangling
+            # 上面矩阵列 0 全 0 => node 0 dangling
         ]),
         {"damping": 0.85, "max_iter": 100, "tol": 1e-9},
     ))
@@ -143,6 +203,18 @@ def main() -> int:
             [0.0, 0.0, 1.0, 0.0],
         ]),
         {"damping": 0.5, "max_iter": 100, "tol": 1e-9},
+    ))
+
+    # Case 7: 明确多 dangling（列 2、3 全 0）
+    cases.append((
+        "multi_dangling",
+        np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]),
+        {"damping": 0.85, "max_iter": 100, "tol": 1e-9},
     ))
 
     all_passed = True
