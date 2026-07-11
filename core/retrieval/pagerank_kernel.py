@@ -43,13 +43,31 @@ def has_rust_csr_kernel() -> bool:
     return bool(_HAS_RUST_CSR)
 
 
+def _normalize_personalization(
+    personalization: Optional[Sequence[float]],
+    n: int,
+) -> Optional[list]:
+    """将 personalization 转为 list[float]；非法时返回 None 表示走 fallback。"""
+    if personalization is None:
+        return None
+    arr = np.asarray(personalization, dtype=np.float64).reshape(-1)
+    if arr.shape[0] != n:
+        return None
+    total = float(arr.sum())
+    if total <= 0.0:
+        # 交给 Rust 侧回退均匀；传全 0 也等价
+        return arr.tolist()
+    return arr.tolist()
+
+
 def rust_pagerank_dense_uniform(
     adjacency: np.ndarray,
     damping: float,
     max_iter: int,
     tol: float,
+    personalization: Optional[Sequence[float]] = None,
 ) -> Optional[np.ndarray]:
-    """Rust 实现的均匀 personalization PageRank（dense matrix）。
+    """Rust 实现的 PageRank（dense matrix，可选 personalization）。
 
     返回与 `graph_store.compute_pagerank` 等价的 dense score 向量，
     或 None 表示 Rust 不可用（调用方应走 Python fallback）。
@@ -75,11 +93,16 @@ def rust_pagerank_dense_uniform(
         logger.debug("图规模过大 (n=%d)，跳过 Rust dense 路径", n)
         return None
 
+    p_list = _normalize_personalization(personalization, n)
+    if personalization is not None and p_list is None:
+        return None
+
     scores_list = _rust_pagerank(
         adjacency.astype(np.float64).tolist(),
         damping,
         max_iter,
         tol,
+        p_list,
     )
     return np.asarray(scores_list, dtype=np.float64)
 
@@ -92,14 +115,16 @@ def rust_pagerank_csr(
     damping: float = 0.85,
     max_iter: int = 100,
     tol: float = 1e-6,
+    personalization: Optional[Sequence[float]] = None,
 ) -> Optional[np.ndarray]:
-    """Rust 实现的均匀 personalization PageRank（CSR / GraphStore 语义）。
+    """Rust 实现的 PageRank（CSR / GraphStore 语义，可选 personalization）。
 
     参数:
         adjacency_or_parts:
             - scipy.sparse csr_matrix / 可 `.tocsr()` 的稀疏矩阵；或
             - (indptr, indices, data, n) 元组
         damping / max_iter / tol: 与 GraphStore.compute_pagerank 一致
+        personalization: 长度 n 的 teleport 向量（会归一化）；None=均匀
 
     邻接语义（与 GraphStore 一致）:
         adj[src, tgt] = src -> tgt，出度 = 行和
@@ -145,6 +170,10 @@ def rust_pagerank_csr(
     if indices.shape[0] != data.shape[0]:
         return None
 
+    p_list = _normalize_personalization(personalization, n)
+    if personalization is not None and p_list is None:
+        return None
+
     scores_list = _rust_pagerank_csr(
         n,
         indptr.tolist(),
@@ -153,5 +182,6 @@ def rust_pagerank_csr(
         damping,
         max_iter,
         tol,
+        p_list,
     )
     return np.asarray(scores_list, dtype=np.float64)

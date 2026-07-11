@@ -9,6 +9,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from typing import Dict, Optional
 
 import numpy as np
 
@@ -61,7 +62,13 @@ _gs = _load_module("core.storage.graph_store", REPO_ROOT / "core" / "storage" / 
 GraphStore = _gs.GraphStore
 
 
-def _scipy_only_pagerank(store: GraphStore, alpha: float = 0.85, max_iter: int = 100, tol: float = 1e-9):
+def _scipy_only_pagerank(
+    store: GraphStore,
+    personalization: Optional[Dict[str, float]] = None,
+    alpha: float = 0.85,
+    max_iter: int = 100,
+    tol: float = 1e-9,
+):
     """绕过 Rust，直接走 scipy 路径（复制原算法）。"""
     from scipy.sparse import diags
 
@@ -73,7 +80,22 @@ def _scipy_only_pagerank(store: GraphStore, alpha: float = 0.85, max_iter: int =
     out_degrees_inv[~dangling] = 1.0 / out_degrees[~dangling]
     D_inv = diags(out_degrees_inv)
     M = adj.T @ D_inv
-    p = np.ones(n) / n
+
+    if personalization is None:
+        p = np.ones(n) / n
+    else:
+        p = np.zeros(n)
+        total_weight = sum(personalization.values())
+        for node, weight in personalization.items():
+            canon = store._canonicalize(node)
+            if canon in store._node_to_idx:
+                idx = store._node_to_idx[canon]
+                p[idx] = weight / total_weight
+        if p.sum() == 0:
+            p = np.ones(n) / n
+        else:
+            p = p / p.sum()
+
     p_orig = p.copy()
     for _ in range(max_iter):
         p_new = alpha * (M @ p) + (1 - alpha) * p_orig
@@ -93,12 +115,16 @@ def _dict_diff(a: dict, b: dict):
     return (max(diffs) if diffs else 0.0), (sum(diffs) if diffs else 0.0)
 
 
-def _run_case(name: str, edges, weights) -> bool:
+def _run_case(name: str, edges, weights, personalization=None) -> bool:
     store = GraphStore()
     store.add_edges(edges, weights=weights)
 
-    path_scores = store.compute_pagerank(personalization=None, alpha=0.85, max_iter=100, tol=1e-9)
-    scipy_scores = _scipy_only_pagerank(store, alpha=0.85, max_iter=100, tol=1e-9)
+    path_scores = store.compute_pagerank(
+        personalization=personalization, alpha=0.85, max_iter=100, tol=1e-9
+    )
+    scipy_scores = _scipy_only_pagerank(
+        store, personalization=personalization, alpha=0.85, max_iter=100, tol=1e-9
+    )
 
     max_diff, l1 = _dict_diff(path_scores, scipy_scores)
     print(f"--- {name} ---")
@@ -152,6 +178,30 @@ def main() -> int:
         "weighted",
         [("X", "Y"), ("Y", "Z"), ("Z", "X"), ("X", "Z")],
         [2.0, 1.0, 0.5, 3.0],
+    ) and ok
+
+    # 个性化: 单 seed
+    ok = _run_case(
+        "pers_seed_A",
+        [("A", "B"), ("A", "C"), ("B", "C"), ("C", "A")],
+        [1.0, 1.0, 1.0, 1.0],
+        personalization={"A": 1.0},
+    ) and ok
+
+    # 个性化: 双 seed + dangling
+    ok = _run_case(
+        "pers_two_seeds_dangling",
+        [("A", "B"), ("B", "C"), ("C", "A"), ("A", "D")],
+        [1.0, 1.0, 1.0, 1.0],
+        personalization={"A": 2.0, "C": 1.0},
+    ) and ok
+
+    # 个性化: 非归一化权重
+    ok = _run_case(
+        "pers_unnormalized",
+        [("X", "Y"), ("Y", "Z"), ("Z", "X"), ("X", "Z")],
+        [2.0, 1.0, 0.5, 3.0],
+        personalization={"X": 3.0, "Y": 1.0, "Z": 5.0},
     ) and ok
 
     print()

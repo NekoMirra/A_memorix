@@ -68,13 +68,28 @@ def dense_j_to_i_to_csr_src_tgt(adj_j_to_i: np.ndarray):
     return csr_matrix(src_tgt)
 
 
-def compare_one(name: str, adj: np.ndarray, damping: float, max_iter: int, tol: float) -> bool:
+def compare_one(
+    name: str,
+    adj: np.ndarray,
+    damping: float,
+    max_iter: int,
+    tol: float,
+    personalization: np.ndarray | None = None,
+) -> bool:
     """对一组参数跑 Python dense / Rust dense / Rust CSR，比较输出。"""
-    py_scores = pagerank_python(adj, damping=damping, max_iter=max_iter, tol=tol)
+    py_scores = pagerank_python(
+        adj,
+        damping=damping,
+        max_iter=max_iter,
+        tol=tol,
+        personalization=personalization,
+    )
+
+    p_list = None if personalization is None else personalization.tolist()
 
     rust_scores = None
     if RUST_AVAILABLE:
-        rust_scores_list = rust_pagerank(adj.tolist(), damping, max_iter, tol)
+        rust_scores_list = rust_pagerank(adj.tolist(), damping, max_iter, tol, p_list)
         rust_scores = np.asarray(rust_scores_list, dtype=np.float64)
     else:
         print(f"[{name}] SKIP dense: Rust 内核未安装（pip install wheel）")
@@ -90,6 +105,7 @@ def compare_one(name: str, adj: np.ndarray, damping: float, max_iter: int, tol: 
             damping,
             max_iter,
             tol,
+            p_list,
         )
         csr_scores = np.asarray(csr_list, dtype=np.float64)
     else:
@@ -215,6 +231,51 @@ def main() -> int:
             [0.0, 0.0, 0.0, 0.0],
         ]),
         {"damping": 0.85, "max_iter": 100, "tol": 1e-9},
+    ))
+
+    # Case 8: 个性化 — 单 seed 节点
+    cases.append((
+        "pers_single_seed",
+        np.array([
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ]),
+        {
+            "damping": 0.85,
+            "max_iter": 100,
+            "tol": 1e-9,
+            "personalization": np.array([1.0, 0.0, 0.0]),
+        },
+    ))
+
+    # Case 9: 个性化 — 双 seed，带 dangling
+    cases.append((
+        "pers_two_seeds_dangling",
+        np.array([
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]),
+        {
+            "damping": 0.85,
+            "max_iter": 100,
+            "tol": 1e-9,
+            "personalization": np.array([0.0, 2.0, 1.0, 0.0]),
+        },
+    ))
+
+    # Case 10: 个性化 — 非归一化权重
+    cases.append((
+        "pers_unnormalized",
+        np.ones((4, 4), dtype=np.float64) - np.eye(4),
+        {
+            "damping": 0.9,
+            "max_iter": 100,
+            "tol": 1e-9,
+            "personalization": np.array([3.0, 1.0, 1.0, 5.0]),
+        },
     ))
 
     all_passed = True

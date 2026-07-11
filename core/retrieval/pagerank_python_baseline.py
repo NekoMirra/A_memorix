@@ -8,12 +8,13 @@
     - 节点 i 的入度 = adj[i].sum()
     - 节点 j 的出度 = adj[:, j].sum()（列和）
 
-PageRank 公式:
-    scores[i] = (1 - damping) / n
+PageRank 公式（支持 personalization 向量 p_orig）:
+    scores[i] = (1 - damping) * p_orig[i]
               + damping * Σ_j (adj[i][j] / out_sum[j]) * scores[j]
-              + damping * dangling_sum / n
+              + damping * dangling_sum * p_orig[i]
 
 其中 dangling_sum = Σ_{k: out_sum[k]=0} scores[k]
+等价于 GraphStore scipy 路径的 (1 - sum) * p_orig 回注。
 """
 from __future__ import annotations
 
@@ -32,7 +33,7 @@ def pagerank_python(
     """Power iteration PageRank，对照 Rust 实现的 Python 版本。
 
     算法语义与 `crates/pagerank_rust/src/lib.rs::pagerank` 完全等价。
-    uniform personalization 下，数值结果与 Rust 在 1e-9 量级一致。
+    数值结果与 Rust 在 1e-9 量级一致。
     """
     if adjacency.ndim != 2 or adjacency.shape[0] != adjacency.shape[1]:
         raise ValueError(
@@ -59,12 +60,11 @@ def pagerank_python(
             p_orig = np.ones(n) / n
 
     # 3) 幂迭代
-    teleport = (1.0 - damping) / n
     scores = p_orig.copy()
     for _ in range(max_iter):
-        # 处理 dangling 节点（出度为 0）：均匀分配给所有节点
+        # 处理 dangling 节点（出度为 0）：按 p_orig 分配
         dangling_sum = float(scores[out_sum == 0.0].sum())
-        dangling_term = damping * dangling_sum / n
+        teleport_scale = (1.0 - damping) + damping * dangling_sum
 
         # acc[i] = Σ_j adj[i][j] / out_sum[j] * scores[j]
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -72,7 +72,7 @@ def pagerank_python(
         weighted = inv_out * scores  # (n,)
         acc = adj @ weighted  # (n,) = adj (n,n) @ weighted (n,)
 
-        next_scores = teleport + damping * acc + dangling_term
+        next_scores = damping * acc + teleport_scale * p_orig
 
         # 收敛判断：L1 差值
         diff = float(np.abs(next_scores - scores).sum())

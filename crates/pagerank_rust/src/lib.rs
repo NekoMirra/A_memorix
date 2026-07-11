@@ -14,16 +14,42 @@
 //!     - 节点 src 的出度 = 行和
 //!     - 转移: M = A^T * D_inv（D_inv 作用于出度）
 //!
-//! PageRank 公式（均匀 personalization）:
-//!     scores[i] = (1 - damping) / n
+//! PageRank 公式（支持 personalization 向量 p_orig，和为 1）:
+//!     scores[i] = (1 - damping) * p_orig[i]
 //!               + damping * Σ_j (edge_j_to_i / out_sum[j]) * scores[j]
-//!               + damping * dangling_sum / n
+//!               + damping * dangling_sum * p_orig[i]
 //!
 //! 其中 dangling_sum = Σ_{k: out_sum[k]=0} scores[k]
 //!
-//! 与 GraphStore scipy 路径在均匀 personalization 下数值等价。
+//! 等价于 GraphStore scipy 路径:
+//!     p_new = alpha * M @ p + (1 - alpha) * p_orig
+//!     p_new += (1 - p_new.sum()) * p_orig   # 悬挂节点流失质量按 p_orig 回注
+//!
+//! 当 personalization 为 None 时 p_orig = 1/n（均匀）。
 
 use pyo3::prelude::*;
+
+/// 解析并归一化 personalization 向量；None 或全 0 时回退均匀分布。
+fn resolve_personalization(n: usize, personalization: Option<Vec<f64>>) -> PyResult<Vec<f64>> {
+    match personalization {
+        None => Ok(vec![1.0_f64 / n as f64; n]),
+        Some(p) => {
+            if p.len() != n {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "personalization 长度 {} != 节点数 {}",
+                    p.len(),
+                    n
+                )));
+            }
+            let total: f64 = p.iter().sum();
+            if total <= 0.0 {
+                Ok(vec![1.0_f64 / n as f64; n])
+            } else {
+                Ok(p.iter().map(|x| x / total).collect())
+            }
+        }
+    }
+}
 
 /// Power iteration 实现的 PageRank（dense，列出度语义）。
 ///
@@ -32,16 +58,18 @@ use pyo3::prelude::*;
 /// - `damping`: 阻尼系数（典型 0.85）
 /// - `max_iter`: 最大迭代次数
 /// - `tol`: 收敛阈值（L1 差值）
+/// - `personalization`: 可选长度 n 的 teleport 向量（会归一化）；None=均匀
 ///
 /// 返回:
 /// - 各节点得分列表，长度 = `len(adjacency)`
 #[pyfunction]
-#[pyo3(signature = (adjacency, damping = 0.85, max_iter = 100, tol = 1e-6))]
+#[pyo3(signature = (adjacency, damping = 0.85, max_iter = 100, tol = 1e-6, personalization = None))]
 fn pagerank(
     adjacency: Vec<Vec<f64>>,
     damping: f64,
     max_iter: usize,
     tol: f64,
+    personalization: Option<Vec<f64>>,
 ) -> PyResult<Vec<f64>> {
     let n = adjacency.len();
     if n == 0 {
@@ -65,11 +93,13 @@ fn pagerank(
         }
     }
 
-    // 2) 处理 dangling node（出度为 0）：均匀分配给所有节点
-    let mut scores = vec![1.0_f64 / n as f64; n];
+    let p_orig = resolve_personalization(n, personalization)?;
+
+    // 2) 初始分数 = personalization
+    let mut scores = p_orig.clone();
 
     // 3) 幂迭代
-    let teleport = (1.0 - damping) / n as f64;
+    // next[i] = damping * acc[i] + (1 - damping + damping * dangling_sum) * p_orig[i]
     let mut next = vec![0.0_f64; n];
     for _ in 0..max_iter {
         let dangling_sum: f64 = scores
@@ -77,7 +107,7 @@ fn pagerank(
             .zip(out_sum.iter())
             .filter_map(|(s, out)| if *out == 0.0 { Some(*s) } else { None })
             .sum();
-        let dangling_term = damping * dangling_sum / n as f64;
+        let teleport_scale = (1.0 - damping) + damping * dangling_sum;
 
         for i in 0..n {
             let mut acc = 0.0_f64;
@@ -86,7 +116,7 @@ fn pagerank(
                     acc += adjacency[i][j] / out_sum[j] * scores[j];
                 }
             }
-            next[i] = teleport + damping * acc + dangling_term;
+            next[i] = damping * acc + teleport_scale * p_orig[i];
         }
 
         // 收敛判断：L1 差值
@@ -112,6 +142,7 @@ fn pagerank(
 /// - `indices`: CSR 列索引（目标节点，i32 兼容 scipy）
 /// - `data`: CSR 非零边权
 /// - `damping` / `max_iter` / `tol`: 同 dense 路径
+/// - `personalization`: 可选长度 n 的 teleport 向量（会归一化）；None=均匀
 ///
 /// 邻接语义:
 /// - 行 = source，列 = target（adj[src, tgt] = src -> tgt）
@@ -120,7 +151,7 @@ fn pagerank(
 ///
 /// 返回长度 n 的得分向量。
 #[pyfunction]
-#[pyo3(signature = (n, indptr, indices, data, damping = 0.85, max_iter = 100, tol = 1e-6))]
+#[pyo3(signature = (n, indptr, indices, data, damping = 0.85, max_iter = 100, tol = 1e-6, personalization = None))]
 fn pagerank_csr(
     n: usize,
     indptr: Vec<i64>,
@@ -129,6 +160,7 @@ fn pagerank_csr(
     damping: f64,
     max_iter: usize,
     tol: f64,
+    personalization: Option<Vec<f64>>,
 ) -> PyResult<Vec<f64>> {
     if n == 0 {
         return Ok(Vec::new());
@@ -193,8 +225,8 @@ fn pagerank_csr(
         out_sum[src] = s;
     }
 
-    let mut scores = vec![1.0_f64 / n as f64; n];
-    let teleport = (1.0 - damping) / n as f64;
+    let p_orig = resolve_personalization(n, personalization)?;
+    let mut scores = p_orig.clone();
     let mut next = vec![0.0_f64; n];
 
     for _ in 0..max_iter {
@@ -204,7 +236,7 @@ fn pagerank_csr(
             .zip(out_sum.iter())
             .filter_map(|(s, out)| if *out == 0.0 { Some(*s) } else { None })
             .sum();
-        let dangling_term = damping * dangling_sum / n as f64;
+        let teleport_scale = (1.0 - damping) + damping * dangling_sum;
 
         // next[tgt] 累加来自各 src 的转移
         next.fill(0.0);
@@ -223,7 +255,7 @@ fn pagerank_csr(
         }
 
         for i in 0..n {
-            next[i] = teleport + damping * next[i] + dangling_term;
+            next[i] = damping * next[i] + teleport_scale * p_orig[i];
         }
 
         let diff: f64 = scores
