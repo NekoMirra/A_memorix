@@ -1,0 +1,19 @@
+[package]
+name = "a_memorix_kernel_rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust acceleration for A_memorix hot paths (PageRank PoC)"
+license = "GPL-3.0"
+
+[lib]
+name = "a_memorix_kernel_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }
+# numpy 绑定需要 pyo3-ffi 与 numpy 版本严格对齐，集成时单独开 feature
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
