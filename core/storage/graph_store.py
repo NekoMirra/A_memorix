@@ -895,6 +895,32 @@ class GraphStore:
 
         n = len(self._nodes)
 
+        # Rust 加速路径：仅均匀 personalization + 中小规模图
+        # GraphStore 邻接语义: adj[src, tgt] = src -> tgt（行和=出度）
+        # Rust PoC 邻接语义: adj[i][j] = j -> i（列和=出度）
+        # 因此必须传 adj.T 才能语义对齐。
+        if personalization is None:
+            try:
+                from ..retrieval.pagerank_kernel import rust_pagerank_dense_uniform
+
+                dense_src_tgt = self._adjacency.astype(np.float64).toarray()
+                dense_for_rust = dense_src_tgt.T  # 对齐 j -> i 语义
+                rust_scores = rust_pagerank_dense_uniform(
+                    dense_for_rust,
+                    damping=alpha,
+                    max_iter=max_iter,
+                    tol=tol,
+                )
+                if rust_scores is not None and len(rust_scores) == n:
+                    logger.debug("PageRank 使用 Rust 内核计算 (n=%d)", n)
+                    return {
+                        self._nodes[idx]: float(val)
+                        for idx, val in enumerate(rust_scores)
+                    }
+            except Exception as exc:
+                # 任何异常都回退 Python/scipy 路径，不阻断业务
+                logger.debug("Rust PageRank 路径失败，回退 scipy: %s", exc)
+
         # 构建列归一化的转移矩阵
         adj = self._adjacency.astype(np.float32)
 
@@ -935,7 +961,7 @@ class GraphStore:
         for i in range(max_iter):
             # p_new = alpha * M * p + (1-alpha) * personalization
             p_new = alpha * (M @ p) + (1 - alpha) * p_orig
-            
+
             # 处理因为悬挂节点导致的概率流失
             current_sum = p_new.sum()
             if current_sum < 1.0:
