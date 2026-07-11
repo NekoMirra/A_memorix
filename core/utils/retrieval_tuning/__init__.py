@@ -1,17 +1,14 @@
-"""Compatibility shim for RetrievalTuningManager.
+"""Retrieval tuning manager package."""
 
-Implementation lives in ``core.utils.retrieval_tuning``.
-"""
-
-from .retrieval_tuning import (
+from .helpers import (
     CATEGORIES,
     INTENSITIES,
     OBJECTIVES,
     RetrievalQueryCase,
-    RetrievalTuningManager,
     RetrievalTuningRoundRecord,
     RetrievalTuningTaskRecord,
 )
+from .manager import RetrievalTuningManager
 
 __all__ = [
     "RetrievalTuningManager",
