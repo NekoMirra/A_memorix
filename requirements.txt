@@ -50,3 +50,9 @@ tenacity>=8.0.0
 
 # 稀疏检索中文分词（可选，未安装时自动回退 char n-gram）
 jieba>=0.42.1
+
+
+# Optional Rust acceleration (PageRank etc.)
+# 安装: pip install ./crates/pagerank_rust
+# 或: maturin develop --release -m crates/pagerank_rust/Cargo.toml
+# a_memorix_kernel_rust>=0.1.0

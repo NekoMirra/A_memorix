@@ -119,7 +119,7 @@ class GraphStore:
         # V5: 简单的异步锁 (实际上 asyncio 环境下单线程主循环可能不需要，但为了安全保留)
         self._lock = asyncio.Lock()
 
-        logger.debug(f"图存储初始化: format={matrix_format}")
+        logger.debug("图存储初始化: format={matrix_format}", matrix_format=matrix_format)
 
     def _canonicalize(self, node: str) -> str:
         """规范化节点名称 (用于去重和内部索引)"""
@@ -151,7 +151,7 @@ class GraphStore:
             self._modification_mode = new_mode
             return
 
-        logger.debug(f"切换图模式: {self._modification_mode.value} -> {new_mode.value}")
+        logger.debug("切换图模式: {self__modification_mode_value} -> {new_mode_value}", self__modification_mode_value=self._modification_mode.value, new_mode_value=new_mode.value)
         
         # 转换逻辑
         if new_mode == GraphModificationMode.INCREMENTAL:
@@ -161,7 +161,7 @@ class GraphStore:
                      self._adjacency = self._adjacency.tolil()
                      logger.debug("已转换为 LIL 格式")
                  except Exception as e:
-                     logger.warning(f"转换为 LIL 失败: {e}")
+                     logger.warning("转换为 LIL 失败: {e}", e=e)
         
         elif new_mode in [GraphModificationMode.BATCH, GraphModificationMode.READ_ONLY]:
             # 转换回配置的格式 (CSR/CSC)
@@ -192,7 +192,7 @@ class GraphStore:
         for node in nodes:
             canon = self._canonicalize(node)
             if canon in self._node_to_idx:
-                logger.debug(f"节点已存在，跳过: {node}")
+                logger.debug("节点已存在，跳过: {node}", node=node)
                 continue
 
             # 添加到节点列表
@@ -215,7 +215,7 @@ class GraphStore:
         if added > 0:
             self._expand_adjacency_matrix(added)
 
-        logger.debug(f"添加 {added} 个节点")
+        logger.debug("添加 {added} 个节点", added=added)
         return added
 
     def add_edges(
@@ -288,7 +288,7 @@ class GraphStore:
                  logger.debug(f"增量添加 {len(edges)} 条边 (LIL)")
                  return len(edges)
              except Exception as e:
-                 logger.warning(f"LIL 增量更新失败，回退到通用方法: {e}")
+                 logger.warning("LIL 增量更新失败，回退到通用方法: {e}", e=e)
                  # Fallback to general method below
 
         # 通用方法 (构建 COO 然后合并)
@@ -366,7 +366,7 @@ class GraphStore:
         tgt_canon = self._canonicalize(target)
 
         if src_canon not in self._node_to_idx or tgt_canon not in self._node_to_idx:
-            logger.warning(f"节点不存在，无法更新权重: {source} -> {target}")
+            logger.warning("节点不存在，无法更新权重: {source} -> {target}", source=source, target=target)
             return 0.0
 
         current_weight = self.get_edge_weight(source, target)
@@ -386,7 +386,7 @@ class GraphStore:
             # add_edges 会覆盖或添加，我们需要覆盖
             self.add_edges([(source, target)], [new_weight])
             
-        logger.debug(f"更新权重 {source}->{target}: {current_weight:.2f} -> {new_weight:.2f}")
+        logger.debug("更新权重 {source}->{target}: {current_weight} -> {new_weight}", source=source, target=target, current_weight=current_weight, new_weight=new_weight)
         return new_weight
 
     def delete_nodes(self, nodes: List[str]) -> int:
@@ -468,7 +468,7 @@ class GraphStore:
         self._adjacency_dirty = True
         self._saliency_cache = None
 
-        logger.info(f"删除 {deleted_count} 个节点")
+        logger.info("删除 {deleted_count} 个节点", deleted_count=deleted_count)
         return deleted_count
 
     def remove_nodes(self, nodes: List[str]) -> int:
@@ -535,7 +535,7 @@ class GraphStore:
         self._total_edges_deleted += deleted
         self._adjacency_dirty = True
         self._saliency_cache = None
-        logger.info(f"删除 {deleted} 条边")
+        logger.info("删除 {deleted} 条边", deleted=deleted)
         return deleted
 
     def remove_edges(self, edges: List[Tuple[str, str]]) -> int:
@@ -975,7 +975,7 @@ class GraphStore:
                 break
             p = p_new
         else:
-            logger.warning(f"PageRank未在 {max_iter} 次迭代内收敛")
+            logger.warning("PageRank未在 {max_iter} 次迭代内收敛", max_iter=max_iter)
 
         # 转换为真实节点名称字典
         return {self._nodes[idx]: float(val) for idx, val in enumerate(p)}
@@ -1036,7 +1036,7 @@ class GraphStore:
             edge_pairs = [(src, tgt) for src, tgt, _ in edges]
             weights = [w for _, _, w in edges]
             count = self.add_edges(edge_pairs, weights)
-            logger.info(f"连接 {count} 对相似节点（阈值={threshold}）")
+            logger.info("连接 {count} 对相似节点（阈值={threshold}）", count=count, threshold=threshold)
             return count
         return 0
 
@@ -1056,7 +1056,7 @@ class GraphStore:
         if self._adjacency is None or factor >= 1.0 or factor <= 0.0:
             return
             
-        logger.debug(f"正在执行全图衰减，因子: {factor}")
+        logger.debug("正在执行全图衰减，因子: {factor}", factor=factor)
         
         # 直接矩阵乘法，SciPy CSR/CSC 非常高效
         self._adjacency *= factor
@@ -1220,10 +1220,10 @@ class GraphStore:
         if self._adjacency is not None:
             with atomic_write(matrix_path, "wb") as f:
                 save_npz(f, self._adjacency)
-            logger.debug(f"保存邻接矩阵: {matrix_path}")
+            logger.debug("保存邻接矩阵: {matrix_path}", matrix_path=matrix_path)
         elif matrix_path.exists():
             matrix_path.unlink()
-            logger.debug(f"删除陈旧邻接矩阵: {matrix_path}")
+            logger.debug("删除陈旧邻接矩阵: {matrix_path}", matrix_path=matrix_path)
 
         # 保存元数据
         metadata = {
@@ -1241,9 +1241,9 @@ class GraphStore:
         metadata_path = data_dir / "graph_metadata.pkl"
         with atomic_write(metadata_path, "wb") as f:
             pickle.dump(metadata, f)
-        logger.debug(f"保存元数据: {metadata_path}")
+        logger.debug("保存元数据: {metadata_path}", metadata_path=metadata_path)
 
-        logger.info(f"图存储已保存到: {data_dir}")
+        logger.info("图存储已保存到: {data_dir}", data_dir=data_dir)
 
     def load(self, data_dir: Optional[Union[str, Path]] = None) -> None:
         """
@@ -1311,7 +1311,7 @@ class GraphStore:
             elif self.matrix_format == "csr" and isinstance(self._adjacency, csc_matrix):
                 self._adjacency = self._adjacency.tocsr()
 
-            logger.debug(f"加载邻接矩阵: {matrix_path}, shape={self._adjacency.shape}")
+            logger.debug("加载邻接矩阵: {matrix_path}, shape={self__adjacency_shape}", matrix_path=matrix_path, self__adjacency_shape=self._adjacency.shape)
 
         # 检查维度不匹配并修复
         if self._adjacency is not None:
@@ -1322,7 +1322,7 @@ class GraphStore:
                  self._adjacency = None
                  self._edge_hash_map = defaultdict(set)
              elif current_n > adj_n:
-                 logger.warning(f"检测到图存储维度不匹配: 节点数={current_n}, 矩阵大小={adj_n}. 正在自动修复...")
+                 logger.warning("检测到图存储维度不匹配: 节点数={current_n}, 矩阵大小={adj_n}. 正在自动修复...", current_n=current_n, adj_n=adj_n)
                  self._expand_adjacency_matrix(current_n - adj_n)
              elif current_n < adj_n:
                  logger.warning(
@@ -1377,7 +1377,7 @@ class GraphStore:
                 self._adjacency.resize((new_n, new_n))
                 # logger.debug(f"扩展 LIL 矩阵: {old_n} -> {new_n}")
             except Exception as e:
-                logger.warning(f"LIL resize 失败，回退到通用方法: {e}")
+                logger.warning("LIL resize 失败，回退到通用方法: {e}", e=e)
                 self._expand_generic(new_n, old_n)
                 
         else:
@@ -1398,7 +1398,7 @@ class GraphStore:
                 )
                 # logger.debug(f"扩展矩阵 (bmat): {old_n} -> {new_n}")
             except Exception as e:
-                logger.warning(f"bmat 扩展失败: {e}")
+                logger.warning("bmat 扩展失败: {e}", e=e)
                 self._expand_generic(new_n, old_n)
 
     def _expand_generic(self, new_n: int, old_n: int):

@@ -227,7 +227,7 @@ class PersonalizedPageRank:
             entities = self._extract_entities_from_query(query)
 
         if not entities:
-            logger.debug(f"未从查询中提取到实体: '{query}'")
+            logger.debug("未从查询中提取到实体: '{query}'", query=query)
             return self.compute(personalization=None, normalize=normalize)
 
         # 计算PPR
